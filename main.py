@@ -15,8 +15,7 @@ from core.cai import (
 )
 
 from core.verification import (
-    verify_translation,
-    protein_preserved
+    verify_translation
 )
 
 from constraints.gc import (
@@ -76,7 +75,8 @@ def optimize(
     seed=None,
     organism2=None,
     weight1=0.5,
-    weight2=0.5
+    weight2=0.5,
+    edit_weight=0.0
 ):
     """
     Main optimization interface.
@@ -100,7 +100,7 @@ def optimize(
         Maximum global GC fraction.
 
     local_gc_window : int
-        Sliding-window size.
+        Sliding-window size for local GC analysis.
 
     local_gc_min : float
         Minimum local GC fraction.
@@ -117,13 +117,33 @@ def optimize(
     forbidden_sites : list
         Restriction sites to avoid.
 
+    population_size : int
+        GA population size.
+
+    generations : int
+        Number of GA generations.
+
+    mutation_rate : float
+        GA mutation rate.
+
+    crossover_rate : float
+        GA crossover rate.
+
+    seed : int
+        Random seed for reproducibility.
+
     organism2 : str
         Second organism for dual-host optimization.
 
-    Returns
-    -------
-    dict
-        Optimization result and validation information.
+    weight1 : float
+        Weight of organism 1 in dual-host optimization.
+
+    weight2 : float
+        Weight of organism 2 in dual-host optimization.
+
+    edit_weight : float
+        Penalty for changing codons from the original sequence.
+        Used by the genetic algorithm.
     """
 
     # --------------------------------------------------
@@ -160,12 +180,8 @@ def optimize(
     elif method == "ga":
 
         optimized_sequence = optimize_ga(
-            sequence=sequence,
+            dna_sequence=sequence,
             organism=organism,
-            population_size=population_size,
-            generations=generations,
-            mutation_rate=mutation_rate,
-            crossover_rate=crossover_rate,
             gc_min=gc_min,
             gc_max=gc_max,
             local_gc_window=local_gc_window,
@@ -174,13 +190,17 @@ def optimize(
             repeat_length=repeat_length,
             max_homopolymer=max_homopolymer,
             forbidden_sites=forbidden_sites,
+            population_size=population_size,
+            generations=generations,
+            mutation_rate=mutation_rate,
+            crossover_rate=crossover_rate,
+            edit_weight=edit_weight,
             seed=seed
         )
 
     elif method == "dual_host":
 
         if organism2 is None:
-
             raise ValueError(
                 "organism2 is required for dual_host optimization."
             )
@@ -210,7 +230,7 @@ def optimize(
     )
 
     # --------------------------------------------------
-    # GC analysis
+    # Global GC analysis
     # --------------------------------------------------
 
     original_gc = gc_content(
@@ -284,7 +304,7 @@ def optimize(
     )
 
     # --------------------------------------------------
-    # CAI
+    # CAI analysis
     # --------------------------------------------------
 
     original_cai = calculate_cai(
@@ -295,6 +315,37 @@ def optimize(
     optimized_cai = calculate_cai(
         optimized_sequence,
         organism
+    )
+
+    # --------------------------------------------------
+    # Codon edit analysis
+    # --------------------------------------------------
+
+    original_codons = [
+        sequence[i:i + 3]
+        for i in range(0, len(sequence), 3)
+    ]
+
+    optimized_codons = [
+        optimized_sequence[i:i + 3]
+        for i in range(0, len(optimized_sequence), 3)
+    ]
+
+    changed_codons = sum(
+        original != optimized
+        for original, optimized
+        in zip(
+            original_codons,
+            optimized_codons
+        )
+    )
+
+    total_codons = len(original_codons)
+
+    edit_rate = (
+        changed_codons / total_codons
+        if total_codons > 0
+        else 0.0
     )
 
     # --------------------------------------------------
@@ -318,7 +369,6 @@ def optimize(
     # --------------------------------------------------
 
     result = {
-
         "original_sequence": sequence,
 
         "optimized_sequence": optimized_sequence,
@@ -385,6 +435,14 @@ def optimize(
             restriction_results
         ),
 
+        "changed_codons": changed_codons,
+
+        "total_codons": total_codons,
+
+        "edit_rate": edit_rate,
+
+        "edit_weight": edit_weight,
+
         "all_constraints_valid": (
             all_constraints_valid
         )
@@ -411,11 +469,13 @@ def print_result(result):
     )
 
     print(
-        f"\nOriginal DNA :\n{result['original_sequence']}"
+        f"\nOriginal DNA :\n"
+        f"{result['original_sequence']}"
     )
 
     print(
-        f"\nOptimized DNA:\n{result['optimized_sequence']}"
+        f"\nOptimized DNA:\n"
+        f"{result['optimized_sequence']}"
     )
 
     print(
@@ -436,6 +496,22 @@ def print_result(result):
     print(
         f"Optimized CAI: "
         f"{result['optimized_cai']:.4f}"
+    )
+
+    print(
+        f"\nChanged codons : "
+        f"{result['changed_codons']}/"
+        f"{result['total_codons']}"
+    )
+
+    print(
+        f"Edit rate      : "
+        f"{result['edit_rate']:.2%}"
+    )
+
+    print(
+        f"Edit weight    : "
+        f"{result['edit_weight']}"
     )
 
     print(
@@ -481,9 +557,7 @@ def main():
     Example command-line execution.
     """
 
-    sequence = (
-        "ATGGCCGCG"
-    )
+    sequence = "ATGGCCGCG"
 
     result = optimize(
         sequence=sequence,
@@ -495,7 +569,8 @@ def main():
         generations=10,
         mutation_rate=0.05,
         crossover_rate=0.8,
-        seed=42
+        seed=42,
+        edit_weight=0.0
     )
 
     print_result(result)
