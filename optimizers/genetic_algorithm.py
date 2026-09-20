@@ -1,23 +1,27 @@
 """
 Genetic Algorithm for synonymous codon optimization.
 
-Objectives:
-    - Maximize CAI
-    - Respect global GC constraints
-    - Control local GC
-    - Penalize repeats
-    - Penalize homopolymers
-    - Penalize forbidden restriction sites
-    - Optionally minimize codon changes
+Features:
+    - CAI optimization
+    - Global GC constraints
+    - Target GC optimization
+    - Local GC constraints
+    - Repeat constraints
+    - Homopolymer constraints
+    - Restriction-site constraints
+    - Edit-rate penalty
+    - Reproducible random seed
+    - GA convergence history
+    - Protein preservation verification
 
-The GA preserves the encoded protein by allowing only
-synonymous codon substitutions.
+The GA only uses synonymous codons, so the encoded
+protein sequence must remain unchanged.
 """
 
 from __future__ import annotations
 
 import random
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from core.cai import calculate_cai
 from core.sequence import get_codons, gc_content
@@ -35,11 +39,11 @@ from constraints.restriction_sites import find_restriction_sites
 
 
 # ============================================================
-# Helper functions
+# Utility functions
 # ============================================================
 
 def split_codons(sequence: str) -> List[str]:
-    """Split DNA sequence into codons."""
+    """Split a DNA sequence into codons."""
     return get_codons(sequence)
 
 
@@ -47,7 +51,13 @@ def count_changes(
     original_codons: List[str],
     candidate_codons: List[str],
 ) -> int:
-    """Count changed codon positions."""
+    """Count the number of codon positions that changed."""
+
+    if len(original_codons) != len(candidate_codons):
+        raise ValueError(
+            "Codon sequences must have the same length."
+        )
+
     return sum(
         original != candidate
         for original, candidate in zip(
@@ -61,14 +71,18 @@ def edit_rate(
     original_codons: List[str],
     candidate_codons: List[str],
 ) -> float:
-    """Calculate fraction of changed codons."""
+    """Calculate the fraction of codons that changed."""
+
     if not original_codons:
         return 0.0
 
-    return count_changes(
-        original_codons,
-        candidate_codons,
-    ) / len(original_codons)
+    return (
+        count_changes(
+            original_codons,
+            candidate_codons,
+        )
+        / len(original_codons)
+    )
 
 
 # ============================================================
@@ -80,7 +94,11 @@ def gc_penalty(
     gc_min: Optional[float],
     gc_max: Optional[float],
 ) -> float:
-    """Calculate global GC constraint violation."""
+    """
+    Calculate global GC violation.
+
+    Returns zero when GC is inside the requested range.
+    """
 
     penalty = 0.0
 
@@ -98,7 +116,7 @@ def is_gc_feasible(
     gc_min: Optional[float],
     gc_max: Optional[float],
 ) -> bool:
-    """Check whether sequence satisfies global GC constraint."""
+    """Check whether sequence satisfies global GC constraints."""
 
     gc = gc_content(sequence)
 
@@ -109,6 +127,31 @@ def is_gc_feasible(
         return False
 
     return True
+
+
+# ============================================================
+# Target GC
+# ============================================================
+
+def target_gc_deviation(
+    sequence: str,
+    target_gc: Optional[float],
+) -> float:
+    """Calculate absolute deviation from the requested GC target."""
+
+    if target_gc is None:
+        return 0.0
+
+    if not 0.0 <= target_gc <= 1.0:
+        raise ValueError(
+            "target_gc must be between 0.0 and 1.0."
+        )
+
+    actual_gc = gc_content(sequence)
+
+    return abs(
+        actual_gc - target_gc
+    )
 
 
 # ============================================================
@@ -124,8 +167,7 @@ def local_gc_penalty(
     """
     Calculate local GC penalty.
 
-    Each violating sliding window contributes a penalty
-    proportional to how far it lies outside the requested range.
+    Each violating window contributes a penalty.
     """
 
     if window_size is None:
@@ -143,28 +185,53 @@ def local_gc_penalty(
 
     penalty = 0.0
 
-    for window in violations:
+    for violation in violations:
 
-        gc = window["gc_content"]
+        # Support the existing constraint implementation
+        # whether it returns a dictionary or tuple.
+        if isinstance(violation, dict):
 
-        if gc_min is not None and gc < gc_min:
-            penalty += gc_min - gc
+            window_gc = violation.get(
+                "gc_content",
+                violation.get("gc"),
+            )
 
-        if gc_max is not None and gc > gc_max:
-            penalty += gc - gc_max
+            if window_gc is None:
+                penalty += 1.0
+                continue
+
+        elif isinstance(violation, (tuple, list)):
+
+            # If the constraint returns something like:
+            # (start, end, gc)
+            if len(violation) >= 3:
+                window_gc = violation[2]
+            else:
+                penalty += 1.0
+                continue
+
+        else:
+            penalty += 1.0
+            continue
+
+        if gc_min is not None and window_gc < gc_min:
+            penalty += gc_min - window_gc
+
+        if gc_max is not None and window_gc > gc_max:
+            penalty += window_gc - gc_max
 
     return penalty
 
 
 # ============================================================
-# Repeat penalty
+# Repeats
 # ============================================================
 
 def repeat_penalty(
     sequence: str,
     repeat_length: Optional[int],
 ) -> float:
-    """Return the number of detected repeated fragments."""
+    """Return the number of repeat violations."""
 
     if repeat_length is None:
         return 0.0
@@ -181,7 +248,7 @@ def repeat_penalty(
 
 
 # ============================================================
-# Homopolymer penalty
+# Homopolymers
 # ============================================================
 
 def homopolymer_penalty(
@@ -205,14 +272,14 @@ def homopolymer_penalty(
 
 
 # ============================================================
-# Restriction-site penalty
+# Restriction sites
 # ============================================================
 
 def restriction_penalty(
     sequence: str,
     forbidden_sites: Optional[List[str]],
 ) -> float:
-    """Return the number of forbidden restriction-site occurrences."""
+    """Return the number of forbidden restriction-site violations."""
 
     if not forbidden_sites:
         return 0.0
@@ -234,7 +301,8 @@ def build_synonymous_codons(
     codon_table: dict,
 ) -> List[List[str]]:
     """
-    Build possible synonymous codons for every position.
+    Build the list of synonymous codons available
+    for every position.
 
     Stop codons remain unchanged.
     """
@@ -254,7 +322,9 @@ def build_synonymous_codons(
 
         # Preserve stop codons.
         if amino_acid == "*":
-            choices_per_position.append([codon])
+            choices_per_position.append(
+                [codon]
+            )
             continue
 
         if amino_acid not in codon_table:
@@ -273,7 +343,9 @@ def build_synonymous_codons(
                 f"for amino acid '{amino_acid}'."
             )
 
-        choices_per_position.append(choices)
+        choices_per_position.append(
+            choices
+        )
 
     return choices_per_position
 
@@ -288,7 +360,7 @@ def initialize_population(
     population_size: int,
     rng: random.Random,
 ) -> List[List[str]]:
-    """Create initial GA population."""
+    """Create the initial GA population."""
 
     if population_size < 1:
         raise ValueError(
@@ -309,19 +381,24 @@ def initialize_population(
 
             original = original_codons[position]
 
-            # Keep some original codons for diversity.
+            # Keep some original codons to preserve
+            # diversity around the starting sequence.
             if (
                 original in choices
                 and rng.random() < 0.30
             ):
-                individual.append(original)
+                individual.append(
+                    original
+                )
 
             else:
                 individual.append(
                     rng.choice(choices)
                 )
 
-        population.append(individual)
+        population.append(
+            individual
+        )
 
     return population
 
@@ -334,8 +411,10 @@ def calculate_fitness(
     codons: List[str],
     original_codons: List[str],
     organism: str,
+
     gc_min: Optional[float] = None,
     gc_max: Optional[float] = None,
+    target_gc: Optional[float] = None,
 
     local_gc_window: Optional[int] = None,
     local_gc_min: Optional[float] = None,
@@ -347,6 +426,7 @@ def calculate_fitness(
 
     cai_weight: float = 1.0,
     gc_weight: float = 10.0,
+    target_gc_weight: float = 10.0,
     local_gc_weight: float = 5.0,
     repeat_weight: float = 5.0,
     homopolymer_weight: float = 5.0,
@@ -354,16 +434,20 @@ def calculate_fitness(
     edit_weight: float = 0.0,
 ) -> float:
     """
-    Calculate constraint-aware GA fitness.
+    Calculate constraint-aware fitness.
 
-    F =
+    Fitness:
+
         CAI
-        - global GC penalty
-        - local GC penalty
+        - global GC violation
+        - target GC deviation
+        - local GC violation
         - repeat penalty
         - homopolymer penalty
         - restriction-site penalty
         - edit-rate penalty
+
+    Higher fitness is better.
     """
 
     sequence = "".join(codons)
@@ -390,6 +474,15 @@ def calculate_fitness(
     )
 
     # --------------------------------------------------------
+    # Target GC
+    # --------------------------------------------------------
+
+    target_deviation = target_gc_deviation(
+        sequence,
+        target_gc,
+    )
+
+    # --------------------------------------------------------
     # Local GC
     # --------------------------------------------------------
 
@@ -401,7 +494,7 @@ def calculate_fitness(
     )
 
     # --------------------------------------------------------
-    # Repeats
+    # Repeat
     # --------------------------------------------------------
 
     repeat_violation = repeat_penalty(
@@ -410,7 +503,7 @@ def calculate_fitness(
     )
 
     # --------------------------------------------------------
-    # Homopolymers
+    # Homopolymer
     # --------------------------------------------------------
 
     homopolymer_violation = homopolymer_penalty(
@@ -431,7 +524,7 @@ def calculate_fitness(
     # Edit rate
     # --------------------------------------------------------
 
-    rate = edit_rate(
+    changes = edit_rate(
         original_codons,
         codons,
     )
@@ -440,31 +533,50 @@ def calculate_fitness(
     # Fitness
     # --------------------------------------------------------
 
-    # Strong penalty for global GC violation.
+    # Global GC is treated as a strong constraint.
     HARD_CONSTRAINT_PENALTY = 1000.0
 
-    return (
+    fitness = (
         cai_weight * cai
 
-        - gc_weight
-        * HARD_CONSTRAINT_PENALTY
-        * global_gc_violation
+        - (
+            gc_weight
+            * HARD_CONSTRAINT_PENALTY
+            * global_gc_violation
+        )
 
-        - local_gc_weight
-        * local_violation
+        - (
+            target_gc_weight
+            * target_deviation
+        )
 
-        - repeat_weight
-        * repeat_violation
+        - (
+            local_gc_weight
+            * local_violation
+        )
 
-        - homopolymer_weight
-        * homopolymer_violation
+        - (
+            repeat_weight
+            * repeat_violation
+        )
 
-        - restriction_weight
-        * restriction_violation
+        - (
+            homopolymer_weight
+            * homopolymer_violation
+        )
 
-        - edit_weight
-        * rate
+        - (
+            restriction_weight
+            * restriction_violation
+        )
+
+        - (
+            edit_weight
+            * changes
+        )
     )
+
+    return fitness
 
 
 # ============================================================
@@ -477,7 +589,7 @@ def tournament_selection(
     rng: random.Random,
     tournament_size: int = 3,
 ) -> List[str]:
-    """Select an individual using tournament selection."""
+    """Select one individual using tournament selection."""
 
     size = min(
         tournament_size,
@@ -506,7 +618,7 @@ def crossover(
     parent2: List[str],
     rng: random.Random,
 ) -> Tuple[List[str], List[str]]:
-    """Single-point crossover."""
+    """Perform single-point crossover."""
 
     if len(parent1) != len(parent2):
         raise ValueError(
@@ -547,7 +659,7 @@ def mutate(
     mutation_rate: float,
     rng: random.Random,
 ) -> List[str]:
-    """Replace codons with synonymous alternatives."""
+    """Mutate codons using synonymous substitutions."""
 
     result = individual.copy()
 
@@ -565,6 +677,7 @@ def mutate(
         ]
 
         if alternatives:
+
             result[position] = rng.choice(
                 alternatives
             )
@@ -573,7 +686,63 @@ def mutate(
 
 
 # ============================================================
-# Genetic Algorithm
+# History helper
+# ============================================================
+
+def create_history_entry(
+    generation: int,
+    population: List[List[str]],
+    fitnesses: List[float],
+    original_codons: List[str],
+    organism: str,
+) -> Dict[str, Any]:
+    """
+    Create one GA convergence-history record.
+    """
+
+    best_index = max(
+        range(len(population)),
+        key=lambda index: fitnesses[index],
+    )
+
+    best_individual = population[
+        best_index
+    ]
+
+    best_sequence = "".join(
+        best_individual
+    )
+
+    return {
+        "generation": generation,
+
+        "best_fitness": max(
+            fitnesses
+        ),
+
+        "mean_fitness": (
+            sum(fitnesses)
+            / len(fitnesses)
+        ),
+
+        "best_cai": calculate_cai(
+            best_sequence,
+            organism,
+        ),
+
+        "best_gc": gc_content(
+            best_sequence
+        ),
+
+        "edit_rate": edit_rate(
+            original_codons,
+            best_individual,
+        ),
+    }
+
+
+# ============================================================
+# Main GA
 # ============================================================
 
 def optimize_ga(
@@ -583,6 +752,7 @@ def optimize_ga(
     # Global GC
     gc_min: Optional[float] = None,
     gc_max: Optional[float] = None,
+    target_gc: Optional[float] = None,
 
     # Local GC
     local_gc_window: Optional[int] = None,
@@ -605,15 +775,41 @@ def optimize_ga(
     # Fitness weights
     cai_weight: float = 1.0,
     gc_weight: float = 10.0,
+    target_gc_weight: float = 10.0,
     local_gc_weight: float = 5.0,
     repeat_weight: float = 5.0,
     homopolymer_weight: float = 5.0,
     restriction_weight: float = 5.0,
     edit_weight: float = 0.0,
 
+    # Reproducibility
     seed: Optional[int] = None,
-) -> str:
-    """Optimize DNA using a constraint-aware Genetic Algorithm."""
+
+    # New research feature
+    return_history: bool = False,
+) -> Union[str, Dict[str, Any]]:
+    """
+    Optimize DNA using a Genetic Algorithm.
+
+    By default:
+
+        result = optimize_ga(...)
+
+    returns:
+
+        str
+
+    When:
+
+        return_history=True
+
+    the result becomes:
+
+        {
+            "sequence": "...",
+            "history": [...]
+        }
+    """
 
     # --------------------------------------------------------
     # Validate parameters
@@ -639,11 +835,51 @@ def optimize_ga(
             "crossover_rate must be between 0 and 1."
         )
 
-    if gc_min is not None and gc_max is not None:
-        if gc_min > gc_max:
+    if gc_min is not None:
+
+        if not 0.0 <= gc_min <= 1.0:
             raise ValueError(
-                "gc_min cannot be greater than gc_max."
+                "gc_min must be between 0 and 1."
             )
+
+    if gc_max is not None:
+
+        if not 0.0 <= gc_max <= 1.0:
+            raise ValueError(
+                "gc_max must be between 0 and 1."
+            )
+
+    if (
+        gc_min is not None
+        and gc_max is not None
+        and gc_min > gc_max
+    ):
+        raise ValueError(
+            "gc_min cannot be greater than gc_max."
+        )
+
+    if target_gc is not None:
+
+        if not 0.0 <= target_gc <= 1.0:
+            raise ValueError(
+                "target_gc must be between 0.0 and 1.0."
+            )
+
+    if (
+        local_gc_min is not None
+        and not 0.0 <= local_gc_min <= 1.0
+    ):
+        raise ValueError(
+            "local_gc_min must be between 0 and 1."
+        )
+
+    if (
+        local_gc_max is not None
+        and not 0.0 <= local_gc_max <= 1.0
+    ):
+        raise ValueError(
+            "local_gc_max must be between 0 and 1."
+        )
 
     if (
         local_gc_min is not None
@@ -656,7 +892,7 @@ def optimize_ga(
         )
 
     # --------------------------------------------------------
-    # Prepare sequence
+    # Prepare DNA
     # --------------------------------------------------------
 
     dna_sequence = dna_sequence.upper().strip()
@@ -669,6 +905,10 @@ def optimize_ga(
         dna_sequence
     )
 
+    # --------------------------------------------------------
+    # Host codon table
+    # --------------------------------------------------------
+
     codon_table = get_codon_table(
         organism
     )
@@ -678,7 +918,13 @@ def optimize_ga(
         codon_table,
     )
 
-    rng = random.Random(seed)
+    # --------------------------------------------------------
+    # Reproducible random generator
+    # --------------------------------------------------------
+
+    rng = random.Random(
+        seed
+    )
 
     # --------------------------------------------------------
     # Initial population
@@ -695,7 +941,9 @@ def optimize_ga(
     # Fitness wrapper
     # --------------------------------------------------------
 
-    def fitness(individual: List[str]) -> float:
+    def fitness(
+        individual: List[str],
+    ) -> float:
 
         return calculate_fitness(
             individual,
@@ -704,6 +952,7 @@ def optimize_ga(
 
             gc_min,
             gc_max,
+            target_gc,
 
             local_gc_window,
             local_gc_min,
@@ -715,6 +964,7 @@ def optimize_ga(
 
             cai_weight,
             gc_weight,
+            target_gc_weight,
             local_gc_weight,
             repeat_weight,
             homopolymer_weight,
@@ -723,42 +973,55 @@ def optimize_ga(
         )
 
     # --------------------------------------------------------
-    # Best solution
+    # History
     # --------------------------------------------------------
 
-    best_individual = original_codons.copy()
+    history: List[Dict[str, Any]] = []
 
-    best_fitness = fitness(
-        best_individual
+    # --------------------------------------------------------
+    # Initial population fitness
+    # --------------------------------------------------------
+
+    fitnesses = [
+        fitness(individual)
+        for individual in population
+    ]
+
+    history.append(
+        create_history_entry(
+            generation=0,
+            population=population,
+            fitnesses=fitnesses,
+            original_codons=original_codons,
+            organism=organism,
+        )
     )
+
+    # --------------------------------------------------------
+    # Initial best
+    # --------------------------------------------------------
+
+    best_index = max(
+        range(len(population)),
+        key=lambda index: fitnesses[index],
+    )
+
+    best_individual = population[
+        best_index
+    ].copy()
+
+    best_fitness = fitnesses[
+        best_index
+    ]
 
     # --------------------------------------------------------
     # Evolution
     # --------------------------------------------------------
 
-    for _generation in range(generations):
-
-        fitnesses = [
-            fitness(individual)
-            for individual in population
-        ]
-
-        current_best_index = max(
-            range(len(population)),
-            key=lambda index: fitnesses[index],
-        )
-
-        current_best_fitness = fitnesses[
-            current_best_index
-        ]
-
-        if current_best_fitness > best_fitness:
-
-            best_fitness = current_best_fitness
-
-            best_individual = population[
-                current_best_index
-            ].copy()
+    for generation in range(
+        1,
+        generations + 1,
+    ):
 
         # ----------------------------------------------------
         # Elitism
@@ -777,11 +1040,13 @@ def optimize_ga(
 
         new_population = [
             population[index].copy()
-            for index in ranked_indices[:elite_count]
+            for index in ranked_indices[
+                :elite_count
+            ]
         ]
 
         # ----------------------------------------------------
-        # Generate children
+        # Create children
         # ----------------------------------------------------
 
         while len(new_population) < population_size:
@@ -800,6 +1065,7 @@ def optimize_ga(
                 tournament_size,
             )
 
+            # Crossover
             if rng.random() < crossover_rate:
 
                 child1, child2 = crossover(
@@ -813,6 +1079,7 @@ def optimize_ga(
                 child1 = parent1.copy()
                 child2 = parent2.copy()
 
+            # Mutation
             child1 = mutate(
                 child1,
                 synonymous,
@@ -827,51 +1094,71 @@ def optimize_ga(
                 rng,
             )
 
-            new_population.append(child1)
+            new_population.append(
+                child1
+            )
 
             if len(new_population) < population_size:
-                new_population.append(child2)
+
+                new_population.append(
+                    child2
+                )
 
         population = new_population
 
+        # ----------------------------------------------------
+        # Evaluate new generation
+        # ----------------------------------------------------
+
+        fitnesses = [
+            fitness(individual)
+            for individual in population
+        ]
+
+        # ----------------------------------------------------
+        # Update best solution
+        # ----------------------------------------------------
+
+        current_best_index = max(
+            range(len(population)),
+            key=lambda index: fitnesses[index],
+        )
+
+        current_best_fitness = fitnesses[
+            current_best_index
+        ]
+
+        if current_best_fitness > best_fitness:
+
+            best_fitness = (
+                current_best_fitness
+            )
+
+            best_individual = population[
+                current_best_index
+            ].copy()
+
+        # ----------------------------------------------------
+        # Save convergence information
+        # ----------------------------------------------------
+
+        history.append(
+            create_history_entry(
+                generation=generation,
+                population=population,
+                fitnesses=fitnesses,
+                original_codons=original_codons,
+                organism=organism,
+            )
+        )
+
     # --------------------------------------------------------
-    # Final population evaluation
+    # Candidate sequence
     # --------------------------------------------------------
-
-    final_fitnesses = [
-        fitness(individual)
-        for individual in population
-    ]
-
-    final_best_index = max(
-        range(len(population)),
-        key=lambda index: final_fitnesses[index],
-    )
-
-    if final_fitnesses[final_best_index] > best_fitness:
-
-        best_individual = population[
-            final_best_index
-        ].copy()
 
     optimized_sequence = "".join(
         best_individual
     )
-
-    # --------------------------------------------------------
-    # Protein verification
-    # --------------------------------------------------------
-
-    verification_result = verify_translation(
-        dna_sequence,
-        optimized_sequence,
-    )
-
-    if not verification_result["valid"]:
-        raise RuntimeError(
-            "GA produced a sequence that does not "
-            "preserve the original protein."
-        )
 
     # --------------------------------------------------------
     # Global GC feasibility
@@ -883,15 +1170,22 @@ def optimize_ga(
         gc_max,
     ):
 
-        feasible_candidates = [
-            individual
-            for individual in population
+        feasible_candidates = []
+
+        for individual in population:
+
+            candidate = "".join(
+                individual
+            )
+
             if is_gc_feasible(
-                "".join(individual),
+                candidate,
                 gc_min,
                 gc_max,
-            )
-        ]
+            ):
+                feasible_candidates.append(
+                    individual
+                )
 
         if feasible_candidates:
 
@@ -908,35 +1202,61 @@ def optimize_ga(
 
             raise RuntimeError(
                 "GA did not find a sequence satisfying "
-                "the requested GC constraint."
+                "the requested global GC constraint."
             )
 
     # --------------------------------------------------------
-    # Final protein verification
+    # Protein verification
     # --------------------------------------------------------
+
+    verification_result = verify_translation(
+        dna_sequence,
+        optimized_sequence,
+    )
+
+    if not verification_result["valid"]:
+
+        raise RuntimeError(
+            "GA produced a sequence that does not "
+            "preserve the original protein."
+        )
 
     final_protein = translate_dna(
         optimized_sequence
     )
 
     if final_protein != original_protein:
+
         raise RuntimeError(
             "Protein sequence was not preserved."
         )
+
+    # --------------------------------------------------------
+    # Return
+    # --------------------------------------------------------
+
+    if return_history:
+
+        return {
+            "sequence": optimized_sequence,
+            "history": history,
+        }
 
     return optimized_sequence
 
 
 # ============================================================
-# Compatibility alias
+# Compatibility wrapper
 # ============================================================
 
 def optimize_sequence_ga(
     dna_sequence: str,
     organism: str = "ecoli",
     **kwargs,
-) -> str:
-    """Compatibility wrapper."""
+) -> Union[str, Dict[str, Any]]:
+    """
+    Compatibility wrapper around optimize_ga().
+    """
 
     return optimize_ga(
         dna_sequence,
