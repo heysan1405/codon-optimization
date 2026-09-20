@@ -1,0 +1,11 @@
+id,gene_name,accession,organism,cds_length_bp,protein_length_aa,terminal_stop_present,valid_dna,divisible_by_3,status
+gene01_gfp,GFP,M62653.1,Aequorea victoria,717,238,True,True,True,PASS
+gene02_luc,LUC1,AB644228.1,Photinus pyralis,1653,550,True,True,True,PASS
+gene03_hbb,HBB,NM_000518.5,Homo sapiens,444,147,True,True,True,PASS
+gene04_ins,INS,NM_000207.3,Homo sapiens,333,110,True,True,True,PASS
+gene05_lyz,LYZ,NM_000239.3,Homo sapiens,447,148,True,True,True,PASS
+gene06_actb,ACTB,NM_001101.5,Homo sapiens,1128,375,True,True,True,PASS
+gene07_tp53,TP53,NM_000546.6,Homo sapiens,1182,393,True,True,True,PASS
+gene08_lacz,lacZ,NC_000913.3,Escherichia coli K-12 substr. MG1655,3075,1024,True,True,True,PASS
+gene09_grol,groL,NC_000913.3,Escherichia coli K-12 substr. MG1655,1647,548,True,True,True,PASS
+gene10_soda,sodA,NC_000913.3,Escherichia coli K-12 substr. MG1655,621,206,True,True,True,PASS
