@@ -1051,47 +1051,33 @@ def create_history_entry(
     fitnesses: List[float],
     original_codons: List[str],
     organism: str,
+    best_individual: Optional[List[str]] = None,
+    best_fitness: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Create one convergence-history record."""
+    """Create a history record for the best-so-far individual."""
 
-    best_index = max(
+    current_best_index = max(
         range(len(population)),
         key=lambda index: fitnesses[index],
     )
 
-    best_individual = population[
-        best_index
-    ]
+    if best_individual is None:
+        best_individual = population[current_best_index].copy()
+    else:
+        best_individual = best_individual.copy()
 
-    best_sequence = "".join(
-        best_individual
-    )
+    if best_fitness is None:
+        best_fitness = fitnesses[current_best_index]
+
+    best_sequence = "".join(best_individual)
 
     return {
         "generation": generation,
-
-        "best_fitness": max(
-            fitnesses
-        ),
-
-        "mean_fitness": (
-            sum(fitnesses)
-            / len(fitnesses)
-        ),
-
-        "best_cai": calculate_cai(
-            best_sequence,
-            organism,
-        ),
-
-        "best_gc": gc_content(
-            best_sequence
-        ),
-
-        "edit_rate": edit_rate(
-            original_codons,
-            best_individual,
-        ),
+        "best_fitness": best_fitness,
+        "mean_fitness": sum(fitnesses) / len(fitnesses),
+        "best_cai": calculate_cai(best_sequence, organism),
+        "best_gc": gc_content(best_sequence),
+        "edit_rate": edit_rate(original_codons, best_individual),
     }
 
 
@@ -1501,11 +1487,17 @@ def optimize_ga(
     fitnesses = evaluate_population(population)
 
     # ========================================================
-    # History
+    # Initial best and generation-zero history
     # ========================================================
 
-    history: List[Dict[str, Any]] = []
+    best_index = max(
+        range(len(population)),
+        key=lambda index: fitnesses[index],
+    )
+    best_individual = population[best_index].copy()
+    best_fitness = fitnesses[best_index]
 
+    history: List[Dict[str, Any]] = []
     history.append(
         create_history_entry(
             generation=0,
@@ -1513,25 +1505,10 @@ def optimize_ga(
             fitnesses=fitnesses,
             original_codons=original_codons,
             organism=organism,
+            best_individual=best_individual,
+            best_fitness=best_fitness,
         )
     )
-
-    # ========================================================
-    # Initial best
-    # ========================================================
-
-    best_index = max(
-        range(len(population)),
-        key=lambda index: fitnesses[index],
-    )
-
-    best_individual = population[
-        best_index
-    ].copy()
-
-    best_fitness = fitnesses[
-        best_index
-    ]
 
     # ========================================================
     # Evolution
@@ -1673,6 +1650,8 @@ def optimize_ga(
                 fitnesses=fitnesses,
                 original_codons=original_codons,
                 organism=organism,
+                best_individual=best_individual,
+                best_fitness=best_fitness,
             )
         )
 
