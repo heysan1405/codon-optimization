@@ -26,8 +26,10 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple, Union
 import random
 
-from core.cai import calculate_cai
+from core.cai import calculate_cai, calculate_cai_batch
 from core.sequence import get_codons, gc_content
+from core.rna_structure import mfe_penalty
+
 from core.verification import (
     CODON_TO_AA,
     translate_dna,
@@ -39,7 +41,6 @@ from constraints.local_gc import local_gc_violations
 from constraints.repeats import find_repeats
 from constraints.homopolymer import find_homopolymers
 from constraints.restriction_sites import find_restriction_sites
-
 
 # ============================================================
 # Utility functions
@@ -298,6 +299,31 @@ def restriction_penalty(
 # Codon-pair bias
 # ============================================================
 
+# Cache maximum positive codon-pair frequency by table identity.
+_CODON_PAIR_MAX_CACHE = {}
+
+
+def _max_codon_pair_frequency(codon_pair_table):
+    key = id(codon_pair_table)
+    cached = _CODON_PAIR_MAX_CACHE.get(key)
+    if cached is not None and cached[0] is codon_pair_table:
+        return cached[1]
+
+    values = []
+    for value in codon_pair_table.values():
+        try:
+            value = float(value)
+            if value > 0:
+                values.append(value)
+        except (TypeError, ValueError):
+            continue
+
+    maximum = max(values, default=0.0)
+    _CODON_PAIR_MAX_CACHE[key] = (codon_pair_table, maximum)
+    return maximum
+
+
+
 def codon_pair_penalty(
     sequence: str,
     codon_pair_table: Optional[dict] = None,
@@ -307,6 +333,12 @@ def codon_pair_penalty(
 
     The supplied table must contain experimentally observed
     codon-pair frequencies.
+
+    Supported table key formats:
+
+        ("AAA", "AAG")
+        "AAA-AAG"
+        "AAA_AAG"
 
     Higher observed frequency = lower penalty.
 
@@ -342,18 +374,21 @@ def codon_pair_penalty(
         codon1 = codons[i]
         codon2 = codons[i + 1]
 
-        pair = (
-            codon1,
-            codon2,
-        )
+        # Support the formats used by the project.
+        tuple_key = (codon1, codon2)
+        hyphen_key = f"{codon1}-{codon2}"
+        underscore_key = f"{codon1}_{codon2}"
 
-        frequency = codon_pair_table.get(pair)
+        frequency = codon_pair_table.get(tuple_key)
 
-        # Also support:
-        # {"AAA-AAG": frequency}
         if frequency is None:
             frequency = codon_pair_table.get(
-                f"{codon1}-{codon2}"
+                hyphen_key
+            )
+
+        if frequency is None:
+            frequency = codon_pair_table.get(
+                underscore_key
             )
 
         if frequency is None:
@@ -363,7 +398,8 @@ def codon_pair_penalty(
 
         if frequency < 0:
             raise ValueError(
-                f"Negative codon-pair frequency: {pair}"
+                f"Negative codon-pair frequency: "
+                f"{codon1}, {codon2}"
             )
 
         frequencies.append(frequency)
@@ -371,43 +407,32 @@ def codon_pair_penalty(
     if not frequencies:
         return 0.0
 
-    # Find the maximum observed frequency.
-    all_frequencies = []
-
-    for value in codon_pair_table.values():
-        try:
-            value = float(value)
-
-            if value > 0:
-                all_frequencies.append(value)
-
-        except (TypeError, ValueError):
-            continue
-
-    if not all_frequencies:
-        return 0.0
-
-    max_frequency = max(
-        all_frequencies
-    )
+    # Reuse the maximum frequency for this table.
+    max_frequency = _max_codon_pair_frequency(codon_pair_table)
 
     if max_frequency <= 0:
         return 0.0
 
-    # Normalize observed frequencies to [0, 1].
-    normalized_scores = [
+    if max_frequency <= 0:
+        return 0.0
+
+    # Normalize frequencies to [0, 1].
+    normalized = [
         frequency / max_frequency
         for frequency in frequencies
     ]
 
-    # High frequency -> low penalty.
-    penalty = sum(
-        1.0 - score
-        for score in normalized_scores
-    ) / len(normalized_scores)
+    # Higher codon-pair frequency should produce
+    # a lower penalty.
+    #
+    # frequency == max_frequency -> penalty 0
+    # frequency -> 0            -> penalty approaches 1
+    penalties = [
+        1.0 - value
+        for value in normalized
+    ]
 
-    return penalty
-
+    return sum(penalties) / len(penalties)
 
 # ============================================================
 # K-mer / sequence complexity
@@ -693,6 +718,9 @@ def calculate_fitness(
     codon_pair_weight: float = 0.0,
     kmer_weight: float = 0.0,
     five_prime_gc_weight: float = 0.0,
+    rna_structure_weight: float = 0.0,
+    rna_target_mfe: Optional[float] = None,
+    precomputed_cai: Optional[float] = None,
 ) -> float:
     """
     Calculate complete GA fitness.
@@ -706,9 +734,10 @@ def calculate_fitness(
     # CAI
     # --------------------------------------------------------
 
-    cai = calculate_cai(
-        sequence,
-        organism,
+    cai = (
+        precomputed_cai
+        if precomputed_cai is not None
+        else calculate_cai(sequence, organism)
     )
 
     # --------------------------------------------------------
@@ -810,6 +839,15 @@ def calculate_fitness(
     )
 
     # --------------------------------------------------------
+    # RNA secondary structure / MFE
+    # --------------------------------------------------------
+
+    rna_violation = (
+        mfe_penalty(sequence, target_mfe=rna_target_mfe)
+        if rna_structure_weight != 0.0
+        else 0.0
+    )
+    # --------------------------------------------------------
     # Fitness
     # --------------------------------------------------------
 
@@ -880,6 +918,12 @@ def calculate_fitness(
         - (
             five_prime_gc_weight
             * five_prime_gc_violation
+        )
+
+        # RNA secondary structure / MFE
+        - (
+            rna_structure_weight
+            * rna_violation
         )
     )
 
@@ -1136,6 +1180,11 @@ def optimize_ga(
     codon_pair_weight: float = 0.0,
     kmer_weight: float = 0.0,
     five_prime_gc_weight: float = 0.0,
+    rna_structure_weight: float = 0.0,
+    rna_target_mfe: Optional[float] = None,
+
+    # --------------------------------------------------------
+    # Reproducibility
 
     # --------------------------------------------------------
     # Reproducibility
@@ -1148,6 +1197,7 @@ def optimize_ga(
     # --------------------------------------------------------
 
     return_history: bool = False,
+    device: str = "cpu",
 ) -> Union[str, Dict[str, Any]]:
     """
     Optimize a DNA sequence using a Genetic Algorithm.
@@ -1364,6 +1414,7 @@ def optimize_ga(
 
     def fitness(
         individual: List[str],
+        precomputed_cai: Optional[float] = None,
     ) -> float:
 
         return calculate_fitness(
@@ -1416,16 +1467,38 @@ def optimize_ga(
             codon_pair_weight,
             kmer_weight,
             five_prime_gc_weight,
+            rna_structure_weight,
+            rna_target_mfe,
+            precomputed_cai,
         )
 
     # ========================================================
+    def evaluate_population(individuals):
+        if device not in ("cpu", "cuda", "auto"):
+            raise ValueError("device must be 'cpu', 'cuda', or 'auto'")
+
+        selected_device = device
+        if selected_device == "auto":
+            import torch
+            selected_device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        if selected_device == "cuda":
+            import torch
+            if not torch.cuda.is_available():
+                raise RuntimeError("CUDA requested but unavailable.")
+            sequences = ["".join(individual) for individual in individuals]
+            cai_values = calculate_cai_batch(sequences, organism, device="cuda")
+            return [
+                fitness(individual, cai_value)
+                for individual, cai_value in zip(individuals, cai_values)
+            ]
+
+        return [fitness(individual) for individual in individuals]
+
     # Initial fitness
     # ========================================================
 
-    fitnesses = [
-        fitness(individual)
-        for individual in population
-    ]
+    fitnesses = evaluate_population(population)
 
     # ========================================================
     # History
@@ -1560,10 +1633,7 @@ def optimize_ga(
         # Evaluate population
         # ----------------------------------------------------
 
-        fitnesses = [
-            fitness(individual)
-            for individual in population
-        ]
+        fitnesses = evaluate_population(population)
 
         # ----------------------------------------------------
         # Current best
